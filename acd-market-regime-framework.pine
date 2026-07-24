@@ -1,0 +1,763 @@
+//@version=5
+indicator("ACD Market Regime Framework", overlay=true, max_labels_count=500)
+
+//=============================================================================
+// ACD Market Regime Framework
+// A TradingView Pine Script indicator that converts intraday ACD-style session
+// behavior into a scenario-based macro regime score for long-term market analysis.
+//
+// Core functions:
+// - Defines the session Opening Range and stretch-based A/C levels
+// - Detects and confirms intraday regime transitions
+// - Maps daily behavior to S1-S26 scenario classifications
+// - Aggregates daily macro values into a rolling 30-day cumulative score
+// - Visualizes daily regime labels and the latest 30-session summary table
+//
+// Inspired by Mark Fisher's ACD framework and opening-range concepts associated
+// with Toby Crabel.
+//
+// For educational and analytical purposes only.
+//=============================================================================
+
+//================= INPUTS =================
+stretch_len = input.int(10, "Stretch Lookback (days)", minval = 1)
+
+//================= DAILY STRETCH (LOCKED PER DAY) =================
+[d_stretch_sma] = request.security(
+     syminfo.tickerid,
+     "D",
+     [ta.sma(math.min(high - open, open - low), stretch_len)],
+     lookahead = barmerge.lookahead_on)
+
+// previous completed day
+stretch = d_stretch_sma[1]
+
+// lock per day
+var float day_stretch = na
+
+new_day = ta.change(time("D")) != 0
+if new_day
+    day_stretch := stretch
+
+//================= OR / STATE VARIABLES =================
+var float or_h = na
+var float or_l = na
+var int   bars = 0
+var bool  ready = false
+
+// Tracking variables for A levels
+var bool au = false
+var bool ad = false
+var bool au_confirmed = false
+var bool ad_confirmed = false
+var int au_confirmed_bar = na
+var int ad_confirmed_bar = na
+
+// Tracking variables for C levels
+var bool cu = false
+var bool cd = false
+var bool cu_confirmed = false
+var bool cd_confirmed = false
+var int cu_confirmed_bar = na
+var int cd_confirmed_bar = na
+
+// Track when A levels are first touched (for S1/S2 validation)
+var int first_touched_ad_bar = na
+var int first_touched_au_bar = na
+
+// Track when C levels are first touched
+var int first_touched_cd_bar = na
+var int first_touched_cu_bar = na
+
+// Tracking for S15, S16, S25, S26 - failed C attempts
+var bool cu_touched = false
+var bool cd_touched = false
+var bool went_below_or_after_au = false
+var bool went_above_or_after_ad = false
+
+// Tracking for S17-S24 - failed A attempts
+var bool au_touched = false
+var bool ad_touched = false
+var bool au_failed = false
+var bool ad_failed = false
+
+// Tracking for S5 and S6 - late day A breakouts
+var bool no_a_cross_until_315 = true
+var bool au_crossed_late = false
+var bool ad_crossed_late = false
+
+// Tracking for S7, S8, S11, S12, S13, S14 - reversal scenarios
+var bool never_below_or_after_cu = true
+var bool never_above_or_after_cd = true
+
+// Tracking for S9 and S10 - late day C reversals
+var bool no_cu_until_315 = true
+var bool no_cd_until_315 = true
+var bool cu_crossed_late = false
+var bool cd_crossed_late = false
+
+var array<string> all_dates = array.new<string>()
+var array<int> all_scenarios = array.new<int>()
+var array<int> all_macros = array.new<int>()
+
+// Store yesterday's OR values
+var float yesterday_or_h = na
+var float yesterday_or_l = na
+
+//================= NEW DAY RESET =================
+if new_day
+    yesterday_or_h := or_h
+    yesterday_or_l := or_l
+
+    or_h := na
+    or_l := na
+    bars := 0
+    ready := false
+    au := false
+    ad := false
+    au_confirmed := false
+    ad_confirmed := false
+    au_confirmed_bar := na
+    ad_confirmed_bar := na
+    cu := false
+    cd := false
+    cu_confirmed := false
+    cd_confirmed := false
+    cu_confirmed_bar := na
+    cd_confirmed_bar := na
+    first_touched_ad_bar := na
+    first_touched_au_bar := na
+    first_touched_cd_bar := na
+    first_touched_cu_bar := na
+    cu_touched := false
+    cd_touched := false
+    went_below_or_after_au := false
+    went_above_or_after_ad := false
+    au_touched := false
+    ad_touched := false
+    au_failed := false
+    ad_failed := false
+    no_a_cross_until_315 := true
+    au_crossed_late := false
+    ad_crossed_late := false
+    never_below_or_after_cu := true
+    never_above_or_after_cd := true
+    no_cu_until_315 := true
+    no_cd_until_315 := true
+    cu_crossed_late := false
+    cd_crossed_late := false
+
+//================= OPENING RANGE =================
+bars += 1
+if bars <= 1
+    or_h := na(or_h) ? high : high
+    or_l := na(or_l) ? low  : low
+if bars == 1
+    ready := true
+
+//================= TIME / MARKET CLOSED =================
+current_time = hour(time) * 100 + minute(time)
+market_closed = current_time >= 1510 or not barstate.isrealtime
+
+//================= A / C LEVELS USING LOCKED STRETCH =================
+au_l = or_h + day_stretch
+ad_l = or_l - day_stretch
+cu_l = au_l + day_stretch
+cd_l = ad_l - day_stretch
+
+//================= MAIN INTRADAY LOGIC =================
+if ready
+    // Track first time touches
+    if low <= ad_l and na(first_touched_ad_bar)
+        first_touched_ad_bar := bars
+    if high >= au_l and na(first_touched_au_bar)
+        first_touched_au_bar := bars
+    if low <= cd_l and na(first_touched_cd_bar)
+        first_touched_cd_bar := bars
+    if high >= cu_l and na(first_touched_cu_bar)
+        first_touched_cu_bar := bars
+
+    // Track touches
+    if high >= cu_l and not cu_touched
+        cu_touched := true
+    if low <= cd_l and not cd_touched
+        cd_touched := true
+    if high >= au_l and not au_touched
+        au_touched := true
+    if low <= ad_l and not ad_touched
+        ad_touched := true
+
+    // After A confirmations, track OR breaks
+    if au_confirmed and low < or_l
+        went_below_or_after_au := true
+    if ad_confirmed and high > or_h
+        went_above_or_after_ad := true
+
+    // Before 3:15 – has any A/C crossed?
+    if current_time < 1515
+        if high >= au_l or low <= ad_l
+            no_a_cross_until_315 := false
+        if high >= cu_l
+            no_cu_until_315 := false
+        if low <= cd_l
+            no_cd_until_315 := false
+
+    // Late (3:20–3:25) A/C crosses
+    if current_time >= 1520 and current_time <= 1525
+        if high >= au_l and no_a_cross_until_315
+            au_crossed_late := true
+        if low <= ad_l and no_a_cross_until_315
+            ad_crossed_late := true
+        if high >= cu_l and no_cu_until_315 and ad_confirmed
+            cu_crossed_late := true
+        if low <= cd_l and no_cd_until_315 and au_confirmed
+            cd_crossed_late := true
+
+    // A triggers
+    if high >= au_l and not au
+        au := true
+    if low <= ad_l and not ad
+        ad := true
+
+    // A confirmations - immediate, no 2-bar hold
+    if au and not au_confirmed
+        if low >= au_l
+            au_confirmed := true
+            au_confirmed_bar := bars
+        else
+            if au_touched and not au_confirmed
+                au_failed := true
+
+    if ad and not ad_confirmed
+        if high <= ad_l
+            ad_confirmed := true
+            ad_confirmed_bar := bars
+        else
+            if ad_touched and not ad_confirmed
+                ad_failed := true
+
+    // C triggers
+    if high >= cu_l and not cu
+        cu := true
+    if low <= cd_l and not cd
+        cd := true
+
+    // C confirmations - immediate, no 2-bar hold
+    if cu and not cu_confirmed
+        if low >= cu_l
+            cu_confirmed := true
+            cu_confirmed_bar := bars
+
+    if cd and not cd_confirmed
+        if high <= cd_l
+            cd_confirmed := true
+            cd_confirmed_bar := bars
+
+    // After C confirmations, watch OR break
+    if cu_confirmed and low < or_l
+        never_below_or_after_cu := false
+    if cd_confirmed and high > or_h
+        never_above_or_after_cd := false
+
+//================= PLOTTING LEVELS =================
+plot(ready ? or_h : na, "OR H", color.blue, 2, plot.style_circles)
+plot(ready ? or_l : na, "OR L", color.blue, 2, plot.style_circles)
+plot(ready ? au_l : na, "A U", color.green, 1, plot.style_circles)
+plot(ready ? ad_l : na, "A D", color.green, 1, plot.style_circles)
+plot(ready ? cu_l : na, "C U", color.orange, 1, plot.style_circles)
+plot(ready ? cd_l : na, "C D", color.orange, 1, plot.style_circles)
+
+//================= POSITION / SCENARIO LOGIC =================
+in_or    = close >= or_l and close <= or_h
+above_or = close > or_h
+below_or = close < or_l
+
+var bool never_below_or_after_au = true
+var bool never_above_or_after_ad = true
+
+if new_day
+    never_below_or_after_au := true
+    never_above_or_after_ad := true
+
+if ready
+    if au_confirmed and low < or_l
+        never_below_or_after_au := false
+    if ad_confirmed and high > or_h
+        never_above_or_after_ad := false
+
+// ----- S1–S26 detection -----
+int s = 0
+int macro = 0
+
+if ready
+    bool ad_then_cu = ad_confirmed and cu_confirmed and not na(ad_confirmed_bar) and not na(cu_confirmed_bar) and ad_confirmed_bar < cu_confirmed_bar
+    bool au_then_cd = au_confirmed and cd_confirmed and not na(au_confirmed_bar) and not na(cd_confirmed_bar) and au_confirmed_bar < cd_confirmed_bar
+
+    bool au_confirmed_before_ad_touch = au_confirmed and (na(first_touched_ad_bar) or (not na(au_confirmed_bar) and au_confirmed_bar < first_touched_ad_bar))
+    bool ad_confirmed_before_au_touch = ad_confirmed and (na(first_touched_au_bar) or (not na(ad_confirmed_bar) and ad_confirmed_bar < first_touched_au_bar))
+
+    bool ad_touched_before_au = ad_touched and au_touched and not na(first_touched_ad_bar) and not na(first_touched_au_bar) and first_touched_ad_bar < first_touched_au_bar
+    bool au_touched_before_ad = au_touched and ad_touched and not na(first_touched_au_bar) and not na(first_touched_ad_bar) and first_touched_au_bar < first_touched_ad_bar
+
+    bool au_confirmed_before_ad_triggered = au_confirmed and (not ad_touched or (not na(au_confirmed_bar) and not na(first_touched_ad_bar) and au_confirmed_bar < first_touched_ad_bar))
+    bool ad_confirmed_before_au_triggered = ad_confirmed and (not au_touched or (not na(ad_confirmed_bar) and not na(first_touched_au_bar) and ad_confirmed_bar < first_touched_au_bar))
+
+    if ad_confirmed and cu_crossed_late and close > cu_l
+        macro := 4
+        s := 9
+    else if au_confirmed and cd_crossed_late and close < cd_l
+        macro := -4
+        s := 10
+    else if ad_touched and ad_failed and au_confirmed and not ad_confirmed and above_or and not na(first_touched_ad_bar) and not na(au_confirmed_bar) and first_touched_ad_bar < au_confirmed_bar
+        macro := 3
+        s := 17
+    else if au_touched and au_failed and ad_confirmed and not au_confirmed and below_or and not na(first_touched_au_bar) and not na(ad_confirmed_bar) and first_touched_au_bar < ad_confirmed_bar
+        macro := -3
+        s := 18
+    else if ad_failed and au_confirmed and not ad_confirmed and never_below_or_after_au and in_or
+        macro := 1
+        s := 19
+    else if au_failed and ad_confirmed and not au_confirmed and never_above_or_after_ad and in_or
+        macro := -1
+        s := 20
+    else if ad_failed and not ad_confirmed and not au_touched and above_or
+        macro := 1
+        s := 21
+    else if au_failed and not au_confirmed and not ad_touched and below_or
+        macro := -1
+        s := 22
+    else if ad_touched_before_au and ad_failed and au_failed and not ad_confirmed and not au_confirmed and in_or
+        macro := 0
+        s := 23
+    else if au_touched_before_ad and au_failed and ad_failed and not au_confirmed and not ad_confirmed and in_or
+        macro := 0
+        s := 24
+    else if au_confirmed_before_ad_triggered and cd_touched and not cd_confirmed and above_or
+        macro := 2
+        s := 25
+    else if ad_confirmed_before_au_triggered and cu_touched and not cu_confirmed and below_or
+        macro := -2
+        s := 26
+    else if au_confirmed and went_below_or_after_au and cd_touched and not cd_confirmed and in_or
+        macro := 3
+        s := 15
+    else if ad_confirmed and went_above_or_after_ad and cu_touched and not cu_confirmed and in_or
+        macro := -3
+        s := 16
+    else if ad_then_cu and never_below_or_after_cu and above_or
+        macro := 4
+        s := 7
+    else if au_then_cd and never_above_or_after_cd and below_or
+        macro := -4
+        s := 8
+    else if ad_then_cu and never_below_or_after_cu and in_or
+        macro := 0
+        s := 11
+    else if au_then_cd and never_above_or_after_cd and in_or
+        macro := 0
+        s := 12
+    else if au_then_cd and above_or
+        macro := 0
+        s := 13
+    else if ad_then_cu and below_or
+        macro := 0
+        s := 14
+    else if au_crossed_late and close > au_l
+        macro := 2
+        s := 5
+    else if ad_crossed_late and close < ad_l
+        macro := -2
+        s := 6
+    else if au_confirmed_before_ad_touch and never_below_or_after_au and above_or
+        macro := 2
+        s := 1
+    else if ad_confirmed_before_au_touch and never_above_or_after_ad and below_or
+        macro := -2
+        s := 2
+    else if au_confirmed and never_below_or_after_au and in_or
+        macro := 0
+        s := 3
+    else if ad_confirmed and never_above_or_after_ad and in_or
+        macro := 0
+        s := 4
+
+// PLOT PREVIOUS DAY'S VALUE ON NEW DAY
+if new_day and s[1] >= 0
+    label_color = color.new(color.gray, 0)
+
+    if macro[1] > 0
+        label_color := color.new(color.green, 0)
+    else if macro[1] < 0
+        label_color := color.new(color.red, 0)
+    else if macro[1] == 0
+        label_color := color.new(color.gray, 0)
+
+    bool prev_day_already_in_array = false
+    prev_date_str = str.format("{0,date,MM/dd}", time[1])
+    if array.size(all_dates) > 0
+        last_stored_date = array.get(all_dates, array.size(all_dates) - 1)
+        if last_stored_date == prev_date_str
+            prev_day_already_in_array := true
+
+    cum_sum = 0
+    bool show_prev_day = s[1] >= 0 and market_closed[1] and not prev_day_already_in_array
+
+    if show_prev_day
+        if array.size(all_macros) > 0
+            start_index = math.max(0, array.size(all_macros) - 29)
+            for j = start_index to array.size(all_macros) - 1
+                cum_sum += array.get(all_macros, j)
+        cum_sum += macro[1]
+    else
+        if array.size(all_macros) > 0
+            start_index = math.max(0, array.size(all_macros) - 30)
+            for j = start_index to array.size(all_macros) - 1
+                cum_sum += array.get(all_macros, j)
+
+    desc = ""
+    if s[1] == 1
+        desc := "A↑ Never Below"
+    else if s[1] == 2
+        desc := "A↓ Never Above"
+    else if s[1] == 3
+        desc := "A↑ Never Below - In OR"
+    else if s[1] == 4
+        desc := "A↓ Never Above - In OR"
+    else if s[1] == 5
+        desc := "Late A↑ Breakout"
+    else if s[1] == 6
+        desc := "Late A↓ Breakout"
+    else if s[1] == 7
+        desc := "A↓→C↑ Never Below"
+    else if s[1] == 8
+        desc := "A↑→C↓ Never Above"
+    else if s[1] == 9
+        desc := "Late A↓→C↑ Reversal"
+    else if s[1] == 10
+        desc := "Late A↑→C↓ Reversal"
+    else if s[1] == 11
+        desc := "A↓→C↑ NB - In OR"
+    else if s[1] == 12
+        desc := "A↑→C↓ NA - In OR"
+    else if s[1] == 13
+        desc := "A↑→C↓ Above OR"
+    else if s[1] == 14
+        desc := "A↓→C↑ Below OR"
+    else if s[1] == 15
+        desc := "A↑→C↓ Failed - In OR"
+    else if s[1] == 16
+        desc := "A↓→C↑ Failed - In OR"
+    else if s[1] == 17
+        desc := "A↓Fail→A↑ Above OR"
+    else if s[1] == 18
+        desc := "A↑Fail→A↓ Below OR"
+    else if s[1] == 19
+        desc := "A↓Fail→A↑ NB - In OR"
+    else if s[1] == 20
+        desc := "A↑Fail→A↓ NA - In OR"
+    else if s[1] == 21
+        desc := "A↓Fail Only - Above OR"
+    else if s[1] == 22
+        desc := "A↑Fail Only - Below OR"
+    else if s[1] == 23
+        desc := "A↓Fail→A↑Fail - In OR"
+    else if s[1] == 24
+        desc := "A↑Fail→A↓Fail - In OR"
+    else if s[1] == 25
+        desc := "A↑→C↓Fail - Above OR"
+    else if s[1] == 26
+        desc := "A↓→C↑Fail - Below OR"
+    else
+        desc := "No Signal"
+
+    label_text = str.tostring(macro[1]) + " - S" + str.tostring(s[1]) + " - " + desc + "\nCum30d: " + str.tostring(cum_sum)
+    label.new(bar_index - 1, high[1] * 1.004, label_text, color=label_color, textcolor=color.white, style=label.style_label_down, size=size.small)
+
+    // NOW push to arrays
+    date_str = str.format("{0,date,MM/dd}", time[1])
+    array.push(all_dates, date_str)
+    array.push(all_scenarios, s[1])
+    array.push(all_macros, macro[1])
+
+// PLOT CURRENT DAY'S VALUE ON LAST BAR
+if barstate.islast and s >= 0
+    label_color = color.new(color.gray, 0)
+
+    if macro > 0
+        label_color := color.new(color.green, 0)
+    else if macro < 0
+        label_color := color.new(color.red, 0)
+    else if macro == 0
+        label_color := color.new(color.gray, 0)
+
+    cum_sum = 0
+    bool today_already_in_array_label = false
+    current_date_str_label = str.format("{0,date,MM/dd}", time)
+    if array.size(all_dates) > 0
+        last_stored_date_label = array.get(all_dates, array.size(all_dates) - 1)
+        if last_stored_date_label == current_date_str_label
+            today_already_in_array_label := true
+
+    if market_closed and not today_already_in_array_label
+        if array.size(all_macros) > 0
+            start_index = math.max(0, array.size(all_macros) - 29)
+            for j = start_index to array.size(all_macros) - 1
+                cum_sum += array.get(all_macros, j)
+        cum_sum += macro
+    else
+        if array.size(all_macros) > 0
+            start_index = math.max(0, array.size(all_macros) - 30)
+            for j = start_index to array.size(all_macros) - 1
+                cum_sum += array.get(all_macros, j)
+
+    desc = ""
+    if s == 1
+        desc := "A↑ Never Below"
+    else if s == 2
+        desc := "A↓ Never Above"
+    else if s == 3
+        desc := "A↑ Never Below - In OR"
+    else if s == 4
+        desc := "A↓ Never Above - In OR"
+    else if s == 5
+        desc := "Late A↑ Breakout"
+    else if s == 6
+        desc := "Late A↓ Breakout"
+    else if s == 7
+        desc := "A↓→C↑ Never Below"
+    else if s == 8
+        desc := "A↑→C↓ Never Above"
+    else if s == 9
+        desc := "Late A↓→C↑ Reversal"
+    else if s == 10
+        desc := "Late A↑→C↓ Reversal"
+    else if s == 11
+        desc := "A↓→C↑ NB - In OR"
+    else if s == 12
+        desc := "A↑→C↓ NA - In OR"
+    else if s == 13
+        desc := "A↑→C↓ Above OR"
+    else if s == 14
+        desc := "A↓→C↑ Below OR"
+    else if s == 15
+        desc := "A↑→C↓ Failed - In OR"
+    else if s == 16
+        desc := "A↓→C↑ Failed - In OR"
+    else if s == 17
+        desc := "A↓Fail→A↑ Above OR"
+    else if s == 18
+        desc := "A↑Fail→A↓ Below OR"
+    else if s == 19
+        desc := "A↓Fail→A↑ NB - In OR"
+    else if s == 20
+        desc := "A↑Fail→A↓ NA - In OR"
+    else if s == 21
+        desc := "A↓Fail Only - Above OR"
+    else if s == 22
+        desc := "A↑Fail Only - Below OR"
+    else if s == 23
+        desc := "A↓Fail→A↑Fail - In OR"
+    else if s == 24
+        desc := "A↑Fail→A↓Fail - In OR"
+    else if s == 25
+        desc := "A↑→C↓Fail - Above OR"
+    else if s == 26
+        desc := "A↓→C↑Fail - Below OR"
+    else
+        desc := "No Signal"
+
+    label_text = str.tostring(macro) + " - S" + str.tostring(s) + " - " + desc + "\nCum30d: " + str.tostring(cum_sum)
+    label.new(bar_index, high * 1.004, label_text, color=label_color, textcolor=color.white, style=label.style_label_down, size=size.small)
+
+// TABLE: Display last 30 days
+if barstate.islast
+    var tbl = table.new(position.top_right, 4, 32, border_width=1, border_color=color.gray)
+
+    table.cell(tbl, 0, 0, "Date", bgcolor=color.new(color.blue, 30), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 0, "Scenario", bgcolor=color.new(color.blue, 30), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 2, 0, "Type", bgcolor=color.new(color.blue, 30), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 3, 0, "NLV", bgcolor=color.new(color.blue, 30), text_color=color.white, text_size=size.small)
+
+    bool today_already_in_array = false
+    current_date_str = str.format("{0,date,MM/dd}", time)
+
+    if array.size(all_dates) > 0
+        last_stored_date = array.get(all_dates, array.size(all_dates) - 1)
+        if last_stored_date == current_date_str
+            today_already_in_array := true
+
+    cum_sum = 0
+    bool show_today = ready and s >= 0 and market_closed and not today_already_in_array
+
+    if show_today
+        if array.size(all_macros) > 0
+            start_index = math.max(0, array.size(all_macros) - 29)
+            for j = start_index to array.size(all_macros) - 1
+                cum_sum += array.get(all_macros, j)
+        cum_sum += macro
+    else
+        if array.size(all_macros) > 0
+            start_index = math.max(0, array.size(all_macros) - 30)
+            for j = start_index to array.size(all_macros) - 1
+                cum_sum += array.get(all_macros, j)
+
+    table.cell(tbl, 0, 1, "Cumulative (Last 30)", bgcolor=color.new(color.navy, 40), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 1, "NLV Sum", bgcolor=color.new(color.navy, 40), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 2, 1, "", bgcolor=color.new(color.navy, 40), text_color=color.white, text_size=size.small)
+    nlv_color = cum_sum > 0 ? color.new(color.green, 50) : (cum_sum < 0 ? color.new(color.red, 50) : color.new(color.gray, 50))
+    table.cell(tbl, 3, 1, str.tostring(cum_sum), bgcolor=nlv_color, text_color=color.white, text_size=size.small, text_halign=text.align_center)
+
+    array_size = array.size(all_dates)
+    row_offset = 2
+
+    if show_today
+        desc = ""
+        if s == 1
+            desc := "A↑ Never Below"
+        else if s == 2
+            desc := "A↓ Never Above"
+        else if s == 3
+            desc := "A↑ NB - In OR"
+        else if s == 4
+            desc := "A↓ NA - In OR"
+        else if s == 5
+            desc := "Late A↑ BO"
+        else if s == 6
+            desc := "Late A↓ BO"
+        else if s == 7
+            desc := "A↓→C↑ NB"
+        else if s == 8
+            desc := "A↑→C↓ NA"
+        else if s == 9
+            desc := "Late A↓→C↑"
+        else if s == 10
+            desc := "Late A↑→C↓"
+        else if s == 11
+            desc := "A↓→C↑ NB OR"
+        else if s == 12
+            desc := "A↑→C↓ NA OR"
+        else if s == 13
+            desc := "A↑→C↓ Above"
+        else if s == 14
+            desc := "A↓→C↑ Below"
+        else if s == 15
+            desc := "A↑→C↓ Fail OR"
+        else if s == 16
+            desc := "A↓→C↑ Fail OR"
+        else if s == 17
+            desc := "A↓F→A↑ Abv"
+        else if s == 18
+            desc := "A↑F→A↓ Blw"
+        else if s == 19
+            desc := "A↓F→A↑ NB"
+        else if s == 20
+            desc := "A↑F→A↓ NA"
+        else if s == 21
+            desc := "A↓F Only Abv"
+        else if s == 22
+            desc := "A↑F Only Blw"
+        else if s == 23
+            desc := "Both A Fail↓↑"
+        else if s == 24
+            desc := "Both A Fail↑↓"
+        else if s == 25
+            desc := "A↑→C↓F Abv"
+        else if s == 26
+            desc := "A↓→C↑F Blw"
+        else
+            desc := "No Signal"
+
+        cell_color = color.new(color.gray, 70)
+        if macro > 0
+            cell_color := color.new(color.green, 70)
+        else if macro < 0
+            cell_color := color.new(color.red, 70)
+
+        table.cell(tbl, 0, row_offset, current_date_str + " ✓", bgcolor=color.new(color.yellow, 70), text_color=color.white, text_size=size.small)
+        table.cell(tbl, 1, row_offset, "S" + str.tostring(s), bgcolor=cell_color, text_color=color.white, text_size=size.small)
+        table.cell(tbl, 2, row_offset, desc, bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
+
+        nlv_display_color = macro > 0 ? color.new(color.green, 60) : (macro < 0 ? color.new(color.red, 60) : color.new(color.gray, 60))
+        table.cell(tbl, 3, row_offset, str.tostring(macro), bgcolor=nlv_display_color, text_color=color.white, text_size=size.small, text_halign=text.align_center)
+
+        row_offset += 1
+
+    start = math.max(0, array_size - 29)
+    for i = 0 to math.min(array_size - start - 1, 28)
+        row = i + row_offset
+        if row >= 32
+            break
+
+        index = array_size - 1 - i
+        sc = array.get(all_scenarios, index)
+        mc = array.get(all_macros, index)
+        date_val = array.get(all_dates, index)
+
+        desc = ""
+        if sc == 1
+            desc := "A↑ Never Below"
+        else if sc == 2
+            desc := "A↓ Never Above"
+        else if sc == 3
+            desc := "A↑ NB - In OR"
+        else if sc == 4
+            desc := "A↓ NA - In OR"
+        else if sc == 5
+            desc := "Late A↑ BO"
+        else if sc == 6
+            desc := "Late A↓ BO"
+        else if sc == 7
+            desc := "A↓→C↑ NB"
+        else if sc == 8
+            desc := "A↑→C↓ NA"
+        else if sc == 9
+            desc := "Late A↓→C↑"
+        else if sc == 10
+            desc := "Late A↑→C↓"
+        else if sc == 11
+            desc := "A↓→C↑ NB OR"
+        else if sc == 12
+            desc := "A↑→C↓ NA OR"
+        else if sc == 13
+            desc := "A↑→C↓ Above"
+        else if sc == 14
+            desc := "A↓→C↑ Below"
+        else if sc == 15
+            desc := "A↑→C↓ Fail OR"
+        else if sc == 16
+            desc := "A↓→C↑ Fail OR"
+        else if sc == 17
+            desc := "A↓F→A↑ Abv"
+        else if sc == 18
+            desc := "A↑F→A↓ Blw"
+        else if sc == 19
+            desc := "A↓F→A↑ NB"
+        else if sc == 20
+            desc := "A↑F→A↓ NA"
+        else if sc == 21
+            desc := "A↓F Only Abv"
+        else if sc == 22
+            desc := "A↑F Only Blw"
+        else if sc == 23
+            desc := "Both A Fail↓↑"
+        else if sc == 24
+            desc := "Both A Fail↑↓"
+        else if sc == 25
+            desc := "A↑→C↓F Abv"
+        else if sc == 26
+            desc := "A↓→C↑F Blw"
+        else
+            desc := "No Signal"
+
+        cell_color = color.new(color.gray, 70)
+        if mc > 0
+            cell_color := color.new(color.green, 70)
+        else if mc < 0
+            cell_color := color.new(color.red, 70)
+
+        table.cell(tbl, 0, row, date_val, bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.small)
+        table.cell(tbl, 1, row, "S" + str.tostring(sc), bgcolor=cell_color, text_color=color.white, text_size=size.small)
+        table.cell(tbl, 2, row, desc, bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
+
+        nlv_display_color = mc > 0 ? color.new(color.green, 60) : (mc < 0 ? color.new(color.red, 60) : color.new(color.gray, 60))
+        table.cell(tbl, 3, row, str.tostring(mc), bgcolor=nlv_display_color, text_color=color.white, text_size=size.small, text_halign=text.align_center)
